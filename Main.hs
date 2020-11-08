@@ -11,7 +11,7 @@ import Data.String
 import Data.Maybe
 import Data.ConfigFile
 import Network.Mail.Mime
-import Network.FastCGI
+import Network.FastCGI -- from direct-fastcgi
 import Network.HTTP
 import Network.URI
 import Network.Browser (Form (..), formToRequest)
