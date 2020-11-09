@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings, NoMonomorphismRestriction #-}
 {-# LANGUAGE NamedFieldPuns, DisambiguateRecordFields #-}
 {-# LANGUAGE NoMonomorphismRestriction #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
 import Prelude hiding (catch)
@@ -11,7 +12,7 @@ import Data.String
 import Data.Maybe
 import Data.ConfigFile
 import Network.Mail.Mime
-import Network.FastCGI -- from direct-fastcgi
+import Network.FastCGI
 import Network.HTTP
 import Network.URI
 import Network.Browser (Form (..), formToRequest)
@@ -25,6 +26,7 @@ import System.Directory
 import Control.Exception
 import qualified Data.ByteString as BS (length)
 import Data.ByteString.Lazy (fromChunks)
+import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Map as Map
 
 
@@ -37,9 +39,14 @@ plaintextMail to fromAddress subject plainBody = (emptyMail fromAddress) {
     mailTo = [to]
   , mailHeaders = [ ("Subject", subject) ]
   , mailParts = [[
-         Part "text/plain; charset=utf-8" QuotedPrintableText Nothing []
-           $ fromChunks [T.encodeUtf8 plainBody]
-      ]]
+      Part
+        { partType = "text/plain; charset=utf-8"
+        , partEncoding = QuotedPrintableText
+        , partDisposition = DefaultDisposition
+        , partHeaders = []
+        , partContent = PartContent $ fromChunks [T.encodeUtf8 plainBody]
+        }
+    ]]
   }
 
 
@@ -54,22 +61,23 @@ _DONE_REDIRECT = "/done.html"
 
 sendMessage msg = renderSendMail $ plaintextMail _RECIPIENT _SENDER _SUBJECT msg
 
-fPutStrLn s = fPutStr (s ++ "\n")
+fPutStrLn s = output s
 
-die code message = setResponseStatus code >> fPutStrLn message >> fCloseOutput
+die code message = setStatus code message >> fPutStrLn message
 
 catchAll :: IO a -> (SomeException -> IO a) -> IO a
 catchAll a handler = catch a (\e -> let _ = (e :: SomeException) in handler e)
 
 handleAll = flip catchAll
 
+handleRequest :: CGI CGIResult
 handleRequest = do
   --user <- liftIO getEffectiveUserName
   --fPutStrLn $ "user: " ++ user
-  setResponseHeader HttpContentType "text/html; charset=UTF-8"
+  setHeader "Content-type" "text/html; charset=UTF-8"
 
-  contents <- fGetContents
-  _GET <- maybe Map.empty (parseUrlEncoded . fromString) <$> getQueryString
+  contents <- BSL.toStrict <$> getBodyFPS
+  _GET <- maybe Map.empty (parseUrlEncoded . T.encodeUtf8 . T.pack) <$> getVar "QUERY_STRING"
   let _POST = parseUrlEncoded contents
 
   let msgParam1 = listToMaybe <=< Map.lookup "msg" -- 1st passed msg param
@@ -93,13 +101,13 @@ handleRequest = do
             case emailsSent of
               Left (SomeException _) -> die 500 "sending mail failed"
               Right _                -> do
-                                          seeOtherRedirect _DONE_REDIRECT
+                                          redirect _DONE_REDIRECT
                                           fPutStrLn "done"
     _      -> die 400 ("ERROR! GET: " ++ show _POST ++ " POST: " ++ show _POST)
 
 
 main :: IO ()
-main = acceptLoop forkIO handleRequest
+main = runFastCGI (handleErrors handleRequest)
 
 test = sendSms "asdf" >>= putStrLn . smsStatus
 
@@ -117,7 +125,7 @@ data SmsConfig = SmsConfig {
 } deriving (Eq, Show)
 
 
-failOnLeftException :: Monad m => Either SomeException (m a) -> m a
+failOnLeftException :: MonadFail m => Either SomeException (m a) -> m a
 failOnLeftException e = case e of
   Left (SomeException ex) -> fail (show ex)
   Right x                 -> x

@@ -1,0 +1,23 @@
+cabal-version:       >=1.10
+build-type:          Simple
+name:                tellme
+version:             0.1.0.0
+
+executable tellme
+  main-is:             Main.hs
+  build-depends:       base >=4.13
+  default-language:    Haskell2010
+  build-depends:
+      bytestring
+    , ConfigFile
+    , containers
+    , fastcgi
+    , directory
+    , filepath
+    , HTTP
+    , mime-mail
+    , mtl
+    , network
+    , network-uri
+    , snap-core
+    , text
