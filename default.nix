@@ -1,6 +1,6 @@
-{ mkDerivation, base, bytestring, ConfigFile, containers, directory
-, fastcgi, filepath, HTTP, mime-mail, mtl, network, network-uri
-, snap-core, stdenv, text
+{ mkDerivation, base, bytestring, ConfigFile, containers
+, data-default, directory, filepath, HTTP, http-types, mime-mail
+, mtl, network, network-uri, scotty, snap-core, stdenv, text, wai
 }:
 mkDerivation {
   pname = "tellme";
@@ -9,8 +9,9 @@ mkDerivation {
   isLibrary = false;
   isExecutable = true;
   executableHaskellDepends = [
-    base bytestring ConfigFile containers directory fastcgi filepath
-    HTTP mime-mail mtl network network-uri snap-core text
+    base bytestring ConfigFile containers data-default directory
+    filepath HTTP http-types mime-mail mtl network network-uri scotty
+    snap-core text wai
   ];
   license = "unknown";
   hydraPlatforms = stdenv.lib.platforms.none;

@@ -1,18 +1,24 @@
-{-# LANGUAGE OverloadedStrings, NoMonomorphismRestriction #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE NamedFieldPuns, DisambiguateRecordFields #-}
 {-# LANGUAGE NoMonomorphismRestriction #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE MultiWayIf #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
 import Prelude hiding (catch)
 import Data.Text (Text)
+import Data.Maybe (listToMaybe)
+import Data.Traversable (for)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
+import qualified Data.Text.IO as T
+import qualified Data.Text.Lazy as TL
+import System.IO
 import Data.String
 import Data.Maybe
-import Data.ConfigFile
+import qualified Data.ConfigFile as CF
 import Network.Mail.Mime
-import Network.FastCGI
 import Network.HTTP
 import Network.URI
 import Network.Browser (Form (..), formToRequest)
@@ -28,6 +34,14 @@ import qualified Data.ByteString as BS (length)
 import Data.ByteString.Lazy (fromChunks)
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Map as Map
+
+
+import System.Posix.Files
+import Data.Default (def)
+import Network.Socket
+import Network.HTTP.Types.Status
+import Web.Scotty
+import System.Environment (lookupEnv)
 
 
 plaintextMail :: Address -- ^ to
@@ -61,53 +75,63 @@ _DONE_REDIRECT = "/done.html"
 
 sendMessage msg = renderSendMail $ plaintextMail _RECIPIENT _SENDER _SUBJECT msg
 
-fPutStrLn s = output s
-
-die code message = setStatus code message >> fPutStrLn message
-
 catchAll :: IO a -> (SomeException -> IO a) -> IO a
 catchAll a handler = catch a (\e -> let _ = (e :: SomeException) in handler e)
 
 handleAll = flip catchAll
 
-handleRequest :: CGI CGIResult
+handleRequest :: ActionM ()
 handleRequest = do
-  --user <- liftIO getEffectiveUserName
-  --fPutStrLn $ "user: " ++ user
-  setHeader "Content-type" "text/html; charset=UTF-8"
+  msg :: Text <- param "msg"
 
-  contents <- BSL.toStrict <$> getBodyFPS
-  _GET <- maybe Map.empty (parseUrlEncoded . T.encodeUtf8 . T.pack) <$> getVar "QUERY_STRING"
-  let _POST = parseUrlEncoded contents
+  if
+    | T.length msg > 1000000 -> raiseStatus requestEntityTooLarge413 "message too long"
+    | T.length msg == 0      -> raiseStatus badRequest400            "no message entered"
+    | otherwise -> do
+        -- Send SMS
+        smsSent <- liftAndCatchIO $ sendSms (T.unpack msg)
 
-  let msgParam1 = listToMaybe <=< Map.lookup "msg" -- 1st passed msg param
-                  -- prefer POST over GET over raw contents
-      msg       = msgParam1 _POST <|> msgParam1 _GET <|> Just contents
+        let smsInfo = "\n\n--\n" ++ "SMS info: " ++ smsStatus smsSent
 
-  case msg of
-    Just m
-      | BS.length m > 1000000 -> die 413 "message too long"
-      | BS.length m == 0      -> die 413 "no message entered"
-      | otherwise             -> let text = T.decodeUtf8 m in
-          do
-            -- Send SMS
-            smsSent <- liftIO $ sendSms (T.unpack text)
+        -- Send Email
+        emailsSent <- liftAndCatchIO $ try (sendMessage $ msg `T.append` T.pack smsInfo)
 
-            let smsInfo = "\n\n--\n" ++ "SMS info: " ++ smsStatus smsSent
-
-            -- Send Email
-            emailsSent <- liftIO $ try (sendMessage $ text `T.append` T.pack smsInfo)
-
-            case emailsSent of
-              Left (SomeException _) -> die 500 "sending mail failed"
-              Right _                -> do
-                                          redirect _DONE_REDIRECT
-                                          fPutStrLn "done"
-    _      -> die 400 ("ERROR! GET: " ++ show _POST ++ " POST: " ++ show _POST)
+        case emailsSent of
+          Left (e :: SomeException) -> do
+            liftAndCatchIO $ T.hPutStrLn stderr ("Error sending email: " <> T.pack (show e))
+            raiseStatus internalServerError500 "sending mail failed"
+          Right{} -> do
+            redirect _DONE_REDIRECT
+            text "done"
 
 
 main :: IO ()
-main = runFastCGI (handleErrors handleRequest)
+main = do
+  let runtimeDirEnvVars =
+        [ "RUNTIME_DIRECTORY"
+        , "XDG_RUNTIME_DIR"
+        , "TMPDIR"
+        ]
+  mbRuntimeDir <- listToMaybe . catMaybes <$> for runtimeDirEnvVars lookupEnv
+  socketFile <- case mbRuntimeDir of
+    Nothing -> fail $ "Please set one of the " ++ show runtimeDirEnvVars ++ " environment variable for the socket file"
+    Just runtimeDir -> do
+      let socketFile = runtimeDir </> "tellme.socket"
+      createDirectoryIfMissing True (takeDirectory socketFile)
+      pure socketFile
+  removePathForcibly socketFile -- clean up
+
+  -- Open the socket
+  sock <- socket AF_UNIX Stream 0
+  bind sock $ SockAddrUnix socketFile
+  setFileMode socketFile stdFileMode -- ensure `chmod 666` so nginx can write to us
+  listen sock maxListenQueue
+
+  let options = def -- I don't like `data-default`, at least give it a name here
+
+  scottySocket options sock $ do
+    post "/" handleRequest
+
 
 test = sendSms "asdf" >>= putStrLn . smsStatus
 
@@ -132,25 +156,22 @@ failOnLeftException e = case e of
 
 parseUriOrFail url = maybe (fail $ "malformed URI: " ++ url) return (parseURI url)
 
-instance Get_C URI where
+instance CF.Get_C URI where
   get cp s o = do
-    val <- get cp s o
+    val <- CF.get cp s o
     case parseURI val of
       Just x -> return x
-      Nothing -> throwError (ParseError $ "couldn't parse URI " ++ val ++ " from "
+      Nothing -> throwError (CF.ParseError $ "couldn't parse URI " ++ val ++ " from "
                                           ++ "(" ++ s ++ "/" ++ o ++ ")",
                              "parseURI")
 
 
-getSmsConfig :: IO (Either CPError SmsConfig)
+getSmsConfig :: IO (Either CF.CPError SmsConfig)
 getSmsConfig = do
-  -- TODO configure server to see home directory
-  --configPath <- (</> "config") <$> getAppUserDataDirectory "tellme"
-  --let configPath = "/home/niklas/.tellme/config"
-  let configPath = "/var/www/nh2.me/httpdocs/fcgi/config"
+  configPath <- (</> "config") <$> getXdgDirectory XdgConfig "tellme"
   runErrorT $ do
-    cp <- join . liftIO $ readfile emptyCP configPath
-    let conf = get cp "SMS" -- needs NoMonomorphismRestriction or duplication
+    cp <- join . liftIO $ CF.readfile CF.emptyCP configPath
+    let conf = CF.get cp "SMS" -- needs NoMonomorphismRestriction or duplication
     SmsConfig <$> conf "enabled"
               <*> conf "user"
               <*> conf "password"
