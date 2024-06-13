@@ -6,40 +6,32 @@
 {-# LANGUAGE MultiWayIf #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
-import Prelude hiding (catch)
+module Main (main, test) where
+
+import Prelude
 import Data.Text (Text)
-import Data.Maybe (listToMaybe)
+import Data.Maybe (listToMaybe, catMaybes)
 import Data.Traversable (for)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import qualified Data.Text.IO as T
 import qualified Data.Text.Lazy as TL
 import System.IO
-import Data.String
-import Data.Maybe
 import qualified Data.ConfigFile as CF
 import Network.Mail.Mime
 import Network.HTTP
 import Network.URI
-import Network.Browser (Form (..), formToRequest)
+import Network.Browser (Form (..), FormVar, formToRequest)
 import Control.Monad (join)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Except
-import Control.Concurrent (forkIO)
---import System.Posix.User
-import Control.Applicative
-import Snap.Internal.Parsing
 import System.FilePath
 import System.Directory
 import Control.Exception
-import qualified Data.ByteString as BS (length)
 import Data.ByteString.Lazy (fromChunks)
-import qualified Data.ByteString.Lazy as BSL
-import qualified Data.Map as Map
 
 
 import System.Posix.Files
-import Data.Default (def)
 import Network.Socket
 import Network.HTTP.Types.Status
 import Web.Scotty
@@ -66,25 +58,32 @@ plaintextMail to fromAddress subject plainBody = (emptyMail fromAddress) {
   }
 
 
+_RECIPIENT :: Address
 _RECIPIENT = Address { addressName = Just "Niklas Hambüchen",
                       addressEmail = "niklas@nh2.me" }
 
+_SENDER :: Address
 _SENDER = Address { addressName = Just "tellme",
                    addressEmail = "tellme@nh2.me" }
 
+_SUBJECT :: Text
 _SUBJECT = "tellme"
+
+_DONE_REDIRECT :: TL.Text
 _DONE_REDIRECT = "/done.html"
 
+sendMessage :: Text -> IO ()
 sendMessage msg = renderSendMail $ plaintextMail _RECIPIENT _SENDER _SUBJECT msg
 
 catchAll :: IO a -> (SomeException -> IO a) -> IO a
 catchAll a handler = catch a (\e -> let _ = (e :: SomeException) in handler e)
 
+handleAll :: (SomeException -> IO a) -> IO a -> IO a
 handleAll = flip catchAll
 
 handleRequest :: ActionM ()
 handleRequest = do
-  msg :: Text <- param "msg"
+  msg :: Text <- formParam "msg"
 
   if
     | T.length msg > 1000000 -> raiseStatus requestEntityTooLarge413 "message too long"
@@ -104,12 +103,12 @@ handleRequest = do
             raiseStatus internalServerError500 "sending mail failed"
           Right{} -> do
             redirect _DONE_REDIRECT
-            text "done"
 
 
 main :: IO ()
 main = do
-  let runtimeDirEnvVars =
+  let runtimeDirEnvVars :: [String]
+      runtimeDirEnvVars =
         [ "RUNTIME_DIRECTORY"
         , "XDG_RUNTIME_DIR"
         , "TMPDIR"
@@ -129,12 +128,11 @@ main = do
   setFileMode socketFile stdFileMode -- ensure `chmod 666` so nginx can write to us
   listen sock maxListenQueue
 
-  let options = def -- I don't like `data-default`, at least give it a name here
-
-  scottySocket options sock $ do
+  scottySocket defaultOptions sock $ do
     post "/" handleRequest
 
 
+test :: IO ()
 test = sendSms "asdf" >>= putStrLn . smsStatus
 
 data SmsConfig = SmsConfig {
@@ -150,13 +148,6 @@ data SmsConfig = SmsConfig {
   , phone_number_param :: String
 } deriving (Eq, Show)
 
-
-failOnLeftException :: MonadFail m => Either SomeException (m a) -> m a
-failOnLeftException e = case e of
-  Left (SomeException ex) -> fail (show ex)
-  Right x                 -> x
-
-parseUriOrFail url = maybe (fail $ "malformed URI: " ++ url) return (parseURI url)
 
 instance CF.Get_C URI where
   get cp s o = do
@@ -185,9 +176,11 @@ getSmsConfig = do
               <*> conf "phone_number_param"
 
 
+postFormRequest :: URI -> [FormVar] -> Request_String
 postFormRequest uri formData = formToRequest $ Form POST uri formData
 
 
+smsTrim :: String -> String
 smsTrim s
   | length s < 160 = s
   | otherwise      = take 154 s ++ " [...]"
@@ -220,6 +213,7 @@ sendSms fullMsg = do
     failShow msg toShow = return . Left $ msg ++ ": " ++ show toShow
 
 -- Turns the result of 'sendSms' into a String.
+smsStatus :: Either String (Maybe String) -> String
 smsStatus smsResult = case smsResult of
   Left err             -> "Error: " ++ err
   Right (Just service) -> "SMS service response: " ++ service
