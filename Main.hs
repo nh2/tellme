@@ -22,7 +22,9 @@ import Network.Mail.Mime
 import Network.HTTP
 import Network.URI
 import Network.Browser (Form (..), formToRequest)
-import Control.Monad.Error
+import Control.Monad (join)
+import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Except
 import Control.Concurrent (forkIO)
 --import System.Posix.User
 import Control.Applicative
@@ -169,7 +171,7 @@ instance CF.Get_C URI where
 getSmsConfig :: IO (Either CF.CPError SmsConfig)
 getSmsConfig = do
   configPath <- (</> "config") <$> getXdgDirectory XdgConfig "tellme"
-  runErrorT $ do
+  runExceptT $ do
     cp <- join . liftIO $ CF.readfile CF.emptyCP configPath
     let conf = CF.get cp "SMS" -- needs NoMonomorphismRestriction or duplication
     SmsConfig <$> conf "enabled"
