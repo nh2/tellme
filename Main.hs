@@ -34,7 +34,7 @@ import Data.ByteString.Lazy (fromChunks)
 import System.Posix.Files
 import Network.Socket
 import Network.HTTP.Types.Status
-import Web.Scotty (ActionM, post, defaultOptions, redirect, raiseStatus, liftAndCatchIO, formParam, scottySocket)
+import Web.Scotty (ActionM, post, defaultOptions, redirect, formParam, scottySocket, ScottyException(RequestTooLarge), status, text, finish)
 import System.Environment (lookupEnv)
 
 
@@ -86,21 +86,21 @@ handleRequest = do
   msg :: Text <- formParam "msg"
 
   if
-    | T.length msg > 1000000 -> raiseStatus requestEntityTooLarge413 "message too long"
-    | T.length msg == 0      -> raiseStatus badRequest400            "no message entered"
+    | T.length msg > 1000000 -> liftIO $ throwIO RequestTooLarge
+    | T.length msg == 0      -> status badRequest400 >> text "no message entered" >> finish
     | otherwise -> do
         -- Send SMS
-        smsSent <- liftAndCatchIO $ sendSms (T.unpack msg)
+        smsSent <- liftIO $ sendSms (T.unpack msg)
 
         let smsInfo = "\n\n--\n" ++ "SMS info: " ++ smsStatus smsSent
 
         -- Send Email
-        emailsSent <- liftAndCatchIO $ try (sendMessage $ msg `T.append` T.pack smsInfo)
+        emailsSent <- liftIO $ try (sendMessage $ msg `T.append` T.pack smsInfo)
 
         case emailsSent of
           Left (e :: SomeException) -> do
-            liftAndCatchIO $ T.hPutStrLn stderr ("Error sending email: " <> T.pack (show e))
-            raiseStatus internalServerError500 "sending mail failed"
+            liftIO $ T.hPutStrLn stderr ("Error sending email: " <> T.pack (show e))
+            status internalServerError500 >> text "sending mail failed" >> finish
           Right{} -> do
             redirect _DONE_REDIRECT
 
