@@ -1,5 +1,8 @@
 {
   mkDerivation,
+  haskell,
+  fetchFromGitHub,
+
   base,
   bytestring,
   ConfigFile,
@@ -9,6 +12,7 @@
   filepath,
   HTTP,
   http-types,
+  HUnit,
   mime-mail ,
   mtl,
   network,
@@ -28,7 +32,22 @@ mkDerivation {
   executableHaskellDepends = [
     base
     bytestring
-    ConfigFile
+    # See https://github.com/jgoerzen/configfile/issues/13
+    (haskell.lib.overrideCabal
+      (haskell.lib.markUnbroken (haskell.lib.overrideSrc ConfigFile {
+        src = fetchFromGitHub {
+          owner = "jgoerzen";
+          repo = "configfile";
+          rev = "38ae3579dc1f2de70f9967247befe0e94deba269";
+          hash = "sha256-N8O/DooHqL66t8gqwX3IT7gFw+loq+c0IB9DWkBNJWg=";
+        };
+      }))
+      (old: {
+        libraryHaskellDepends = (old.libraryHaskellDepends or []) ++ [
+          HUnit
+        ];
+      })
+    )
     containers
     data-default
     directory
